@@ -5,7 +5,7 @@ import MicrophoneIcon from '../components/icons/MicrophoneIcon';
 import KeyboardIcon from '../components/icons/KeyboardIcon';
 import { ChatMessage } from '../types';
 import PermissionGuideModal from '../components/PermissionGuideModal';
-import { GoogleGenAI, Chat } from "@google/genai";
+import { GoogleGenAI, Chat } from '@google/genai';
 
 // Check for browser support for SpeechRecognition API
 const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -62,7 +62,39 @@ const CompanionScreen: React.FC<CompanionScreenProps> = ({ pataBackground, chatM
     
     const recognitionRef = useRef<any | null>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatRef = useRef<Chat | null>(null);
+    const chatInstance = useRef<Chat | null>(null);
+
+    const getChat = useCallback(() => {
+        if (!chatInstance.current) {
+            if (!process.env.API_KEY) {
+                console.error("API_KEY is not set.");
+                setChatMessages(prev => {
+                    const errorMsg = { from: 'pata' as const, message: 'Pata暂时无法连接，请检查API Key设置。' };
+                    if (prev.some(m => m.message === errorMsg.message)) return prev;
+                    return [...prev, errorMsg];
+                });
+                return null;
+            }
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const historyForAPI = chatMessages
+                .filter(m => m.message !== '...' && !m.message.includes('我的主要功能是陪你一起背书哦') && !m.message.includes('Pata暂时无法连接'))
+                .map(m => ({
+                    role: m.from === 'user' ? 'user' : 'model',
+                    parts: [{ text: m.message }],
+                }));
+            
+            chatInstance.current = ai.chats.create({
+                model: 'gemini-2.5-flash',
+                config: {
+                    systemInstruction: "你是Pata，一个可爱、治愈系的史莱姆宠物。你的性格温柔、体贴，带一点可爱的孩子气。你的主要功能是作为用户支持性的伙伴。保持你的回答简短（如果可能，在80个字以内）、温暖和鼓励。你也是一个很好的倾听者，当用户想谈论他们的感受或发泄时。你也可以帮助用户完成背诵任务。",
+                    temperature: 0.9,
+                    topP: 1,
+                },
+                history: historyForAPI,
+            });
+        }
+        return chatInstance.current;
+    }, [chatMessages, setChatMessages]);
 
     useEffect(() => {
         if (chatMessages.length === 0 && currentUser) {
@@ -77,36 +109,8 @@ const CompanionScreen: React.FC<CompanionScreenProps> = ({ pataBackground, chatM
         }
     }, [chatMessages]);
     
-    useEffect(() => {
-        if (chatRef.current) return;
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-            const systemInstruction = `你是Pata，一个可爱、治愈系的史莱姆宠物。你的性格温柔、体贴，带一点可爱的孩子气。你的主要功能是作为用户支持性的伙伴。保持你的回答简短（如果可能，在80个字以内）、温暖和鼓励。你也是一个很好的倾听者，当用户想谈论他们的感受或发泄时。你也可以帮助用户完成背诵任务。`;
-            
-            const historyForAI = chatMessages
-                .filter(m => m.message !== '...' && !m.message.includes('我的主要功能是陪你一起背书哦'))
-                .map(m => ({
-                    role: m.from === 'user' ? 'user' : 'model',
-                    parts: [{ text: m.message }],
-                }));
-
-            const newChat = ai.chats.create({
-                model: 'gemini-2.5-flash',
-                config: {
-                    systemInstruction,
-                    temperature: 0.9,
-                    topP: 1,
-                },
-                history: historyForAI,
-            });
-            chatRef.current = newChat;
-        } catch (error) {
-            console.error("Failed to initialize Gemini Chat:", error);
-        }
-    }, [chatMessages]);
-
     const handleSendChatMessage = useCallback(async (messageText: string) => {
-        if (!messageText.trim() || isPataReplying || !chatRef.current) return;
+        if (!messageText.trim() || isPataReplying) return;
 
         const newUserMessage: ChatMessage = { from: 'user', message: messageText.trim() };
         setChatMessages(prev => [...prev, newUserMessage]);
@@ -114,38 +118,43 @@ const CompanionScreen: React.FC<CompanionScreenProps> = ({ pataBackground, chatM
         setChatInput('');
 
         try {
-            const stream = await chatRef.current.sendMessageStream({ message: messageText.trim() });
+            const chat = getChat();
+            if (!chat) {
+                throw new Error("Chat not initialized. Check API Key.");
+            }
             
-            setChatMessages(prev => [...prev, { from: 'pata', message: '' }]); 
+            setChatMessages(prev => [...prev, { from: 'pata', message: '' }]);
+
+            const stream = await chat.sendMessageStream({ message: messageText.trim() });
 
             let fullResponse = '';
             for await (const chunk of stream) {
                 fullResponse += chunk.text;
                 setChatMessages(prev => {
-                    const newMessages = [...prev];
-                    if (newMessages.length > 0 && newMessages[newMessages.length - 1].from === 'pata') {
-                        newMessages[newMessages.length - 1].message = fullResponse;
+                    const updatedMessages = [...prev];
+                    const lastMessage = updatedMessages[updatedMessages.length - 1];
+                    if (lastMessage?.from === 'pata') {
+                        lastMessage.message = fullResponse;
                     }
-                    return newMessages;
+                    return updatedMessages;
                 });
             }
             
-            if (fullResponse.trim() === '') {
-                 setChatMessages(prev => {
-                    const newMessages = [...prev];
-                    if (newMessages.length > 0 && newMessages[newMessages.length - 1].from === 'pata') {
-                         newMessages[newMessages.length - 1].message = 'Pata好像不知道该说什么了...';
-                    }
-                    return newMessages;
-                });
-            }
         } catch (error) {
-            console.error("Gemini API error:", error);
-            setChatMessages(prev => [...prev, { from: 'pata', message: 'Pata现在有点累，暂时无法回复，但你的话我都有好好听着哦。' }]);
+            console.error("Chat API error:", error);
+            setChatMessages(prev => {
+                const newMessages = [...prev];
+                const lastMessage = newMessages[newMessages.length -1];
+                if (lastMessage?.from === 'pata' && lastMessage.message === '') {
+                    lastMessage.message = 'Pata现在有点累，暂时无法回复，但你的话我都有好好听着哦。';
+                    return newMessages;
+                }
+                return [...prev, { from: 'pata', message: 'Pata现在有点累，暂时无法回复，但你的话我都有好好听着哦。' }];
+            });
         } finally {
             setIsPataReplying(false);
         }
-    }, [isPataReplying, setChatMessages]);
+    }, [isPataReplying, setChatMessages, getChat]);
     
     // Setup Speech Recognition
     useEffect(() => {
